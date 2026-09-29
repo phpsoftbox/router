@@ -57,6 +57,11 @@ $routes->addControllerMiddleware(UserController::class, ['admin'], only: ['store
 
 Рекомендуется вешать middleware на маршруты или группы; контроллеры/экшены — для точечных случаев.
 
+`addControllerMiddleware()` и `addMiddleware()` (глобальный middleware коллектора) применяются ко всем маршрутам
+коллектора — в том числе зарегистрированным раньше вызова: итоговый список middleware собирается в
+`getRoutes()`/`getNamedRoutes()`, а не в момент регистрации маршрута. Поэтому auth, объявленный после загрузки
+route-файлов, не теряется.
+
 Примеры
 
 ```php
@@ -473,6 +478,10 @@ router:cache:clear
 Кеш сохраняется через `CacheInterface`. В кеш попадают только обработчики
 в виде `Class::method` или invokable‑класс, а middleware должны быть строками
 (alias, группа или class‑string). Замыкания и кастомные валидаторы не поддерживаются.
+
+В кеш записывается итоговый список middleware маршрута (включая глобальные и контроллерные), поэтому к коллектору,
+загруженному из кеша, не нужно повторно применять `addMiddleware()`/`addControllerMiddleware()` — middleware
+продублируются.
 
 ```php
 use PhpSoftBox\Router\Cache\RouteCache;

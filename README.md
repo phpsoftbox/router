@@ -120,6 +120,13 @@ $rc->group(function (RouteCollector $r) {
 ->apply();
 ```
 
+Порядок и повторный вызов middleware
+- Middleware маршрута выполняются в порядке: глобальные (`addMiddleware`), групповые, контроллерные
+  (`addControllerMiddleware`), собственные middleware маршрута; затем обработчик.
+- `Dispatcher` не расходует стек: `RequestHandlerInterface`, переданный в `process()`, при каждом вызове
+  `handle()` заново проходит весь оставшийся стек. Middleware с повтором (retry, транзакции) может вызывать
+  `$handler->handle()` несколько раз — middleware ниже него (auth, CSRF) выполнятся при каждом вызове.
+
 Resource (CRUD) маршруты
 
 ```php

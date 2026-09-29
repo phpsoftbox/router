@@ -40,6 +40,10 @@ final class DummyEntityManagerWithMetadata implements EntityManagerInterface
         return $this->metadata;
     }
 
+    public function clear(): void
+    {
+    }
+
     public function connection(): DummyConnection
     {
         return $this->connection;

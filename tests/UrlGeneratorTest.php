@@ -248,6 +248,28 @@ final class UrlGeneratorTest extends TestCase
     }
 
     /**
+     * Проверяет, что заголовки X-Forwarded-* из запроса не меняют абсолютный URL: их учитывает только
+     * TrustedProxyMiddleware для запросов от доверенных прокси.
+     *
+     * @see RequestContext::fromRequest()
+     */
+    #[Test]
+    public function testRequestContextIgnoresForwardedHeaders(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/password/reset/{token}', fn (ServerRequestInterface $r) => new Response(200))->name('password.reset');
+        $request = new ServerRequest('GET', 'https://shop.example.com/password/forgot', [
+            'X-Forwarded-Host'  => 'evil.example',
+            'X-Forwarded-Proto' => 'http',
+        ]);
+
+        $urlGenerator = new UrlGenerator($rc, request: $request);
+
+        $this->assertSame('https://shop.example.com/password/reset/abc', $urlGenerator->generate('password.reset', ['token' => 'abc'], true));
+    }
+
+    /**
      * Проверяет возврат относительного URL, когда host отсутствует.
      *
      * @see UrlGenerator::generate()

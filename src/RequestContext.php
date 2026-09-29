@@ -6,10 +6,6 @@ namespace PhpSoftBox\Router;
 
 use Psr\Http\Message\ServerRequestInterface;
 
-use function ctype_digit;
-use function explode;
-use function preg_match;
-use function str_contains;
 use function strtolower;
 use function trim;
 
@@ -23,42 +19,16 @@ final class RequestContext
     ) {
     }
 
+    /**
+     * Контекст из URI запроса. Заголовки `X-Forwarded-*` не читаются: их подделывает клиент. За прокси реальные схему,
+     * host и порт подставляет в URI `TrustedProxyMiddleware` (Application) — только для запросов от доверенных прокси.
+     */
     public static function fromRequest(ServerRequestInterface $request): self
     {
-        $uri            = $request->getUri();
-        $forwardedProto = self::firstHeaderValue($request->getHeaderLine('X-Forwarded-Proto'));
-        $forwardedHost  = self::firstHeaderValue($request->getHeaderLine('X-Forwarded-Host'));
-        $forwardedPort  = self::firstHeaderValue($request->getHeaderLine('X-Forwarded-Port'));
-
-        $scheme = trim($forwardedProto);
-        if ($scheme === '') {
-            $scheme = trim($uri->getScheme());
-        }
-        $scheme = $scheme !== '' ? strtolower($scheme) : 'https';
-
-        $host = trim($forwardedHost);
-        $port = self::parsePort($forwardedPort);
-
-        if ($host !== '' && str_contains($host, ':')) {
-            if (preg_match('~^\[(.+)](?::(\d+))?$~', $host, $matches) === 1) {
-                $host = '[' . $matches[1] . ']';
-                if ($port === null && isset($matches[2]) && ctype_digit($matches[2])) {
-                    $port = (int) $matches[2];
-                }
-            } elseif (preg_match('~^([^:]+):(\d+)$~', $host, $matches) === 1) {
-                $host = $matches[1];
-                if ($port === null && ctype_digit($matches[2])) {
-                    $port = (int) $matches[2];
-                }
-            }
-        }
-
-        if ($host === '') {
-            $host = trim($uri->getHost());
-        }
-        if ($port === null) {
-            $port = $uri->getPort();
-        }
+        $uri    = $request->getUri();
+        $scheme = strtolower(trim($uri->getScheme()));
+        $scheme = $scheme !== '' ? $scheme : 'https';
+        $port   = $uri->getPort();
 
         if ($scheme === 'http' && $port === 443) {
             $scheme = 'https';
@@ -71,32 +41,10 @@ final class RequestContext
 
         return new self(
             scheme: $scheme,
-            host: $host,
+            host: trim($uri->getHost()),
             port: $port,
             basePath: '',
         );
-    }
-
-    private static function firstHeaderValue(string $value): string
-    {
-        $trimmed = trim($value);
-        if ($trimmed === '') {
-            return '';
-        }
-
-        $parts = explode(',', $trimmed);
-
-        return trim($parts[0] ?? '');
-    }
-
-    private static function parsePort(string $value): ?int
-    {
-        $value = trim($value);
-        if ($value === '' || !ctype_digit($value)) {
-            return null;
-        }
-
-        return (int) $value;
     }
 
     public function getScheme(): string

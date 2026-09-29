@@ -7,6 +7,7 @@ namespace PhpSoftBox\Router\Tests;
 use InvalidArgumentException;
 use PhpSoftBox\Http\Message\ServerRequest;
 use PhpSoftBox\Router\Exception\InvalidRouteParameterException;
+use PhpSoftBox\Router\Exception\MethodNotAllowedException;
 use PhpSoftBox\Router\ParamTypesEnum;
 use PhpSoftBox\Router\RouteCollector;
 use PhpSoftBox\Router\RouteResolver;
@@ -224,5 +225,178 @@ final class RouteResolverTest extends TestCase
         $this->expectException(InvalidRouteParameterException::class);
         $this->expectExceptionMessage('Invalid parameter: slug');
         $resolver->resolve($bad);
+    }
+
+    /**
+     * Проверяем, что HEAD-запрос без явного HEAD-маршрута сопоставляется с GET-маршрутом.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function headRequestMatchesGetRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', fn ($r) => null)->name('users.index');
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('HEAD', 'https://example.com/users'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('users.index', $match->route->name);
+    }
+
+    /**
+     * Проверяем, что явный HEAD-маршрут приоритетнее GET-маршрута, даже если зарегистрирован позже.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function explicitHeadRouteHasPriorityOverGetRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', fn ($r) => null)->name('users.index');
+        $rc->head('/users', fn ($r) => null)->name('users.head');
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('HEAD', 'https://example.com/users'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('users.head', $match->route->name);
+    }
+
+    /**
+     * Проверяем, что при 405 для пути с GET-маршрутом в списке допустимых методов есть и HEAD.
+     *
+     * @see RouteResolver::resolve()
+     * @see MethodNotAllowedException::allowedMethods()
+     */
+    #[Test]
+    public function methodNotAllowedListsHeadForGetRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', fn ($r) => null);
+        $rc->post('/users', fn ($r) => null);
+
+        try {
+            new RouteResolver($rc)->resolve(new ServerRequest('DELETE', 'https://example.com/users'));
+            $this->fail('Ожидалось исключение MethodNotAllowedException.');
+        } catch (MethodNotAllowedException $exception) {
+            $this->assertSame(['GET', 'POST', 'HEAD'], $exception->allowedMethods());
+        }
+    }
+
+    /**
+     * Проверяем, что маршрут с непрошедшим валидатором не мешает найти следующий подходящий маршрут.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function invalidParamFallsThroughToNextRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/items/{id}', fn ($r) => null)->name('items.show')->validators(['id' => ParamTypesEnum::INT]);
+        $rc->get('/items/new', fn ($r) => null)->name('items.new');
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/items/new'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('items.new', $match->route->name);
+    }
+
+    /**
+     * Проверяем, что строковое значение ParamTypesEnum (формат кеша маршрутов) работает как валидатор.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function stringParamTypeValidatorIsApplied(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users/{id}', fn ($r) => null)->validators(['id' => 'int']);
+
+        $resolver = new RouteResolver($rc);
+
+        $this->assertNotNull($resolver->resolve(new ServerRequest('GET', 'https://example.com/users/10')));
+
+        $this->expectException(InvalidRouteParameterException::class);
+        $resolver->resolve(new ServerRequest('GET', 'https://example.com/users/abc'));
+    }
+
+    /**
+     * Проверяем, что неподдерживаемый валидатор даёт понятное исключение вместо TypeError.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function unsupportedValidatorThrowsInvalidArgument(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users/{id}', fn ($r) => null)->validators(['id' => 'not-a-validator']);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid validator for parameter "id"');
+        new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/users/10'));
+    }
+
+    /**
+     * Проверяем, что значение параметра декодируется из percent-encoding перед валидацией и передачей в матч.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function paramValueIsUrlDecoded(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/tags/{name}', fn ($r) => null)->validators([
+            'name' => fn (string $value): bool => $value === 'a/b?c#d тег',
+        ]);
+
+        $match = new RouteResolver($rc)->resolve(
+            new ServerRequest('GET', 'https://example.com/tags/a%2Fb%3Fc%23d%20%D1%82%D0%B5%D0%B3'),
+        );
+
+        $this->assertNotNull($match);
+        $this->assertSame('a/b?c#d тег', $match->params['name']);
+    }
+
+    /**
+     * Проверяем, что wildcard-значение декодируется с сохранением разделителей сегментов.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function wildcardParamValueIsUrlDecoded(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/docs/{path*}', fn ($r) => null);
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/docs/guide/a%20b/c%23d'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('guide/a b/c#d', $match->params['path']);
+    }
+
+    /**
+     * Проверяем, что пропущенный опциональный параметр не попадает в матч пустой строкой и берётся из defaults.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function missingOptionalParamUsesDefault(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/a/{x?}/b', fn ($r) => null)->defaults(['x' => 'def']);
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/a/b'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('def', $match->params['x']);
     }
 }

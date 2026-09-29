@@ -39,6 +39,7 @@ use function unlink;
 #[CoversMethod(RouteCollector::class, 'importGroup')]
 #[CoversMethod(RouteCollector::class, 'loadFile')]
 #[CoversMethod(RouteCollector::class, 'addMiddleware')]
+#[CoversMethod(RouteCollector::class, 'addControllerMiddleware')]
 #[CoversMethod(RouteCollector::class, 'getRoutes')]
 #[CoversMethod(RouteCollector::class, 'getNamedRoutes')]
 final class RouteCollectorTest extends TestCase
@@ -127,6 +128,73 @@ final class RouteCollectorTest extends TestCase
         $resp = $handler->handle(new ServerRequest('GET', 'https://example.com/api/users'));
 
         $this->assertSame('H-route-group-global', $resp->getHeaderLine('X-Order'));
+    }
+
+    /**
+     * Проверяем, что глобальный middleware, добавленный после регистрации маршрутов, применяется к ним.
+     *
+     * @see RouteCollector::addMiddleware()
+     * @see RouteCollector::getRoutes()
+     * @see RouteCollector::getNamedRoutes()
+     */
+    #[Test]
+    public function addMiddlewareAppliesToRoutesRegisteredEarlier(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', [DummyController::class, 'index'])->name('users.index');
+
+        // Middleware объявлен после загрузки маршрутов.
+        $rc->addMiddleware('auth');
+
+        $this->assertSame(['auth'], $rc->getRoutes()[0]->middlewares);
+        $this->assertSame(['auth'], $rc->getNamedRoutes()['users.index']->middlewares);
+    }
+
+    /**
+     * Проверяем, что middleware контроллера, добавленный после регистрации маршрутов, применяется к ним
+     * с учётом ограничения only.
+     *
+     * @see RouteCollector::addControllerMiddleware()
+     * @see RouteCollector::getNamedRoutes()
+     */
+    #[Test]
+    public function addControllerMiddlewareAppliesToRoutesRegisteredEarlier(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', [DummyController::class, 'index'])->name('users.index');
+        $rc->post('/users', [DummyController::class, 'store'])->name('users.store');
+
+        $rc->addControllerMiddleware(DummyController::class, ['csrf'], only: ['store']);
+
+        $named = $rc->getNamedRoutes();
+        $this->assertSame([], $named['users.index']->middlewares);
+        $this->assertSame(['csrf'], $named['users.store']->middlewares);
+    }
+
+    /**
+     * Проверяем итоговый порядок middleware маршрута: глобальные, групповые, контроллерные, собственные —
+     * независимо от момента добавления глобальных и контроллерных middleware.
+     *
+     * @see RouteCollector::addMiddleware()
+     * @see RouteCollector::addControllerMiddleware()
+     * @see RouteCollector::group()
+     * @see RouteCollector::getRoutes()
+     */
+    #[Test]
+    public function effectiveMiddlewaresKeepGlobalGroupControllerRouteOrder(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->group(function (RouteCollector $r): void {
+            $r->get('/users', [DummyController::class, 'index'])->middleware('route');
+        })->middlewares(['group'])->apply();
+
+        $rc->addControllerMiddleware(DummyController::class, ['controller']);
+        $rc->addMiddleware('global');
+
+        $this->assertSame(['global', 'group', 'controller', 'route'], $rc->getRoutes()[0]->middlewares);
     }
 
     /**

@@ -62,6 +62,10 @@ final class DummyEntityManager implements EntityManagerInterface
         return $this->repository ?? new DummyEntityRepository($this->entities[$entityClass] ?? []);
     }
 
+    public function clear(): void
+    {
+    }
+
     public function connection(): DummyConnection
     {
         return $this->connection;

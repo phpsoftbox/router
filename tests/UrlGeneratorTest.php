@@ -80,6 +80,36 @@ final class UrlGeneratorTest extends TestCase
     }
 
     /**
+     * Проверяет, что спецсимволы в значении параметра кодируются и не ломают путь, query и fragment URL.
+     *
+     * @see UrlGenerator::generate()
+     */
+    #[Test]
+    public function encodesSpecialCharactersInParam(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/tags/{name}', fn (ServerRequestInterface $r) => new Response(200))->name('tag');
+
+        $this->assertSame('/tags/a%2Fb%3Fc%23d%20%7Bx%7D', $this->makeUrlGenerator($rc)->generate('tag', ['name' => 'a/b?c#d {x}']));
+    }
+
+    /**
+     * Проверяет, что wildcard-значение кодируется посегментно с сохранением разделителей "/".
+     *
+     * @see UrlGenerator::generate()
+     */
+    #[Test]
+    public function encodesWildcardParamPerSegment(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/docs/{path*}', fn (ServerRequestInterface $r) => new Response(200))->name('docs.show');
+
+        $this->assertSame('/docs/guide/a%20b%3F/c%23d', $this->makeUrlGenerator($rc)->generate('docs.show', ['path' => 'guide/a b?/c#d']));
+    }
+
+    /**
      * Проверяет удаление optional wildcard, если значение не передано.
      *
      * @see UrlGenerator::generate()
@@ -245,6 +275,28 @@ final class UrlGeneratorTest extends TestCase
         $urlGenerator = new UrlGenerator($rc, request: $request);
 
         $this->assertSame('https://dispatcher.example.com/users/42', $urlGenerator->generate('user.show', ['id' => 42], true));
+    }
+
+    /**
+     * Проверяет, что заголовки X-Forwarded-* из запроса не меняют абсолютный URL: их учитывает только
+     * TrustedProxyMiddleware для запросов от доверенных прокси.
+     *
+     * @see RequestContext::fromRequest()
+     */
+    #[Test]
+    public function testRequestContextIgnoresForwardedHeaders(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/password/reset/{token}', fn (ServerRequestInterface $r) => new Response(200))->name('password.reset');
+        $request = new ServerRequest('GET', 'https://shop.example.com/password/forgot', [
+            'X-Forwarded-Host'  => 'evil.example',
+            'X-Forwarded-Proto' => 'http',
+        ]);
+
+        $urlGenerator = new UrlGenerator($rc, request: $request);
+
+        $this->assertSame('https://shop.example.com/password/reset/abc', $urlGenerator->generate('password.reset', ['token' => 'abc'], true));
     }
 
     /**

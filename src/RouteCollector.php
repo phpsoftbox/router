@@ -10,6 +10,7 @@ use RuntimeException;
 use function array_filter;
 use function array_merge;
 use function array_pop;
+use function array_slice;
 use function array_values;
 use function count;
 use function dirname;
@@ -119,13 +120,29 @@ final class RouteCollector
     private ?RouteGroup $currentGroup    = null;
     private array $controllerMiddlewares = [];
     /**
+     * @var array<int, int> Количество групповых middleware в начале списка middleware маршрута (по индексу маршрута).
+     */
+    private array $groupMiddlewareCounts = [];
+    /**
+     * @var list<Route>|null Маршруты с применёнными глобальными и контроллерными middleware; null — пересобрать.
+     */
+    private ?array $effectiveRoutes = null;
+    /**
+     * @var array<string, Route>|null
+     */
+    private ?array $effectiveNamedRoutes = null;
+    /**
      * @var list<string>
      */
     private array $routeFileStack = [];
 
+    /**
+     * Добавляет глобальный middleware ко всем маршрутам коллектора, включая уже зарегистрированные.
+     */
     public function addMiddleware(MiddlewareInterface|string $middleware): void
     {
         $this->globalMiddlewares[] = $middleware;
+        $this->invalidateEffectiveRoutes();
     }
 
     public function group(callable $callback): RouteGroupBuilder
@@ -213,6 +230,8 @@ final class RouteCollector
     }
 
     /**
+     * Добавляет middleware к маршрутам контроллера, включая уже зарегистрированные.
+     *
      * @param array<MiddlewareInterface|string> $middlewares
      * @param string[] $only
      * @param string[] $except
@@ -228,6 +247,7 @@ final class RouteCollector
             'only'        => $only,
             'except'      => $except,
         ];
+        $this->invalidateEffectiveRoutes();
     }
 
     public function get(
@@ -402,11 +422,20 @@ final class RouteCollector
     }
 
     /**
-     * @return Route[]
+     * Возвращает маршруты с итоговым списком middleware: глобальные, групповые, контроллерные, собственные.
+     *
+     * Глобальные и контроллерные middleware применяются здесь, а не при регистрации, поэтому
+     * addMiddleware()/addControllerMiddleware() действуют и на маршруты, зарегистрированные раньше.
+     *
+     * @return list<Route>
      */
     public function getRoutes(): array
     {
-        return $this->routes;
+        if ($this->effectiveRoutes === null) {
+            $this->buildEffectiveRoutes();
+        }
+
+        return $this->effectiveRoutes;
     }
 
     /**
@@ -414,7 +443,60 @@ final class RouteCollector
      */
     public function getNamedRoutes(): array
     {
-        return $this->namedRoutes;
+        if ($this->effectiveNamedRoutes === null) {
+            $this->buildEffectiveRoutes();
+        }
+
+        return $this->effectiveNamedRoutes;
+    }
+
+    private function buildEffectiveRoutes(): void
+    {
+        $routes = [];
+        $named  = [];
+
+        foreach ($this->routes as $index => $route) {
+            $effective = $this->applyEffectiveMiddlewares($route, $this->groupMiddlewareCounts[$index] ?? 0);
+
+            $routes[] = $effective;
+            if ($effective->name !== null && $effective->name !== '') {
+                $named[$effective->name] = $effective;
+            }
+        }
+
+        $this->effectiveRoutes      = $routes;
+        $this->effectiveNamedRoutes = $named;
+    }
+
+    private function applyEffectiveMiddlewares(Route $route, int $groupMiddlewareCount): Route
+    {
+        $controllerMiddlewares = $this->resolveControllerMiddlewares($route->handler);
+        if ($this->globalMiddlewares === [] && $controllerMiddlewares === []) {
+            return $route;
+        }
+
+        return new Route(
+            method: $route->method,
+            path: $route->path,
+            handler: $route->handler,
+            middlewares: array_merge(
+                $this->globalMiddlewares,
+                array_slice($route->middlewares, 0, $groupMiddlewareCount),
+                $controllerMiddlewares,
+                array_slice($route->middlewares, $groupMiddlewareCount),
+            ),
+            name: $route->name,
+            hosts: $route->hosts,
+            defaults: $route->defaults,
+            validators: $route->validators,
+            scopeBindings: $route->scopeBindings,
+        );
+    }
+
+    private function invalidateEffectiveRoutes(): void
+    {
+        $this->effectiveRoutes      = null;
+        $this->effectiveNamedRoutes = null;
     }
 
     private function buildRoute(
@@ -465,6 +547,7 @@ final class RouteCollector
         }
 
         $this->routes[$index] = $nextRoute;
+        $this->invalidateEffectiveRoutes();
 
         if ($nextRoute->name !== null && $nextRoute->name !== '') {
             $this->namedRoutes[$nextRoute->name] = $nextRoute;
@@ -488,12 +571,9 @@ final class RouteCollector
     ): int {
         $path = $this->currentGroup ? $this->currentGroup->prefix . $path : $path;
 
-        $middlewares = array_merge(
-            $this->globalMiddlewares,
-            $this->currentGroup ? $this->currentGroup->middlewares : [],
-            $this->resolveControllerMiddlewares($handler),
-            $middlewares,
-        );
+        // Глобальные и контроллерные middleware здесь не фиксируются: они применяются в getRoutes().
+        $groupMiddlewares = $this->currentGroup ? $this->currentGroup->middlewares : [];
+        $middlewares      = array_merge($groupMiddlewares, $middlewares);
 
         $hosts = $hosts !== [] ? $hosts : ($this->currentGroup?->hosts ?? []);
 
@@ -525,8 +605,12 @@ final class RouteCollector
         }
 
         $this->routes[] = $route;
+        $index          = count($this->routes) - 1;
 
-        return count($this->routes) - 1;
+        $this->groupMiddlewareCounts[$index] = count($groupMiddlewares);
+        $this->invalidateEffectiveRoutes();
+
+        return $index;
     }
 
     private function requireRouteRegister(string $file): callable

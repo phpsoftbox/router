@@ -9,23 +9,26 @@ use PhpSoftBox\Router\Exception\InvalidRouteParameterException;
 use PhpSoftBox\Router\Exception\MethodNotAllowedException;
 use Psr\Http\Message\ServerRequestInterface;
 
-use function array_filter;
 use function array_replace;
 use function array_unique;
 use function array_values;
 use function ctype_digit;
+use function get_debug_type;
+use function in_array;
+use function is_callable;
 use function is_string;
 use function preg_match;
 use function preg_match_all;
 use function preg_quote;
+use function rawurldecode;
 use function sprintf;
 use function str_ends_with;
 use function strlen;
 use function substr;
 
-use const ARRAY_FILTER_USE_KEY;
 use const PREG_OFFSET_CAPTURE;
 use const PREG_SET_ORDER;
+use const PREG_UNMATCHED_AS_NULL;
 
 readonly class RouteResolver
 {
@@ -34,13 +37,25 @@ readonly class RouteResolver
     ) {
     }
 
+    /**
+     * Ищет первый подходящий маршрут.
+     *
+     * Маршрут подходит, если совпали host, путь, валидаторы параметров и метод. Маршрут, параметр которого не прошёл
+     * валидатор, считается несовпавшим: поиск продолжается по следующим маршрутам. Запрос HEAD при отсутствии
+     * явного HEAD/ANY-маршрута сопоставляется с GET-маршрутом (тело ответа отбрасывает эмиттер/SAPI).
+     *
+     * @throws MethodNotAllowedException путь совпал, но ни один маршрут не принимает метод запроса
+     * @throws InvalidRouteParameterException ничего не совпало, но хотя бы один маршрут отклонён валидатором
+     */
     public function resolve(ServerRequestInterface $request): ?RouteMatch
     {
         $path   = $request->getUri()->getPath();
         $method = $request->getMethod();
         $host   = $request->getUri()->getHost();
 
-        $allowed = [];
+        $allowed          = [];
+        $headFallback     = null;
+        $invalidParameter = null;
 
         foreach ($this->routeCollector->getRoutes() as $route) {
             if (!$this->isHostMatch($route, $host)) {
@@ -52,25 +67,57 @@ readonly class RouteResolver
                 continue;
             }
 
+            $invalidKey = $this->findInvalidParam($route, $params);
+            if ($invalidKey !== null) {
+                $invalidParameter ??= new InvalidRouteParameterException(sprintf(
+                    'Invalid parameter: %s. This may indicate an invalid value or a missing/misordered route for path "%s".',
+                    $invalidKey,
+                    $route->path,
+                ));
+                continue;
+            }
+
             if (!$this->isMethodMatch($route, $method)) {
+                if ($method === 'HEAD' && $route->method === 'GET') {
+                    // Явный HEAD/ANY-маршрут ниже по списку приоритетнее GET.
+                    $headFallback ??= $this->createMatch($route, $params);
+                    continue;
+                }
+
                 if ($route->method !== 'ANY') {
                     $allowed[] = $route->method;
                 }
                 continue;
             }
 
-            $this->validateParams($route, $params);
+            return $this->createMatch($route, $params);
+        }
 
-            $params = array_replace($route->defaults, $params);
-
-            return new RouteMatch($route, $params);
+        if ($headFallback !== null) {
+            return $headFallback;
         }
 
         if ($allowed !== []) {
+            if (in_array('GET', $allowed, true)) {
+                $allowed[] = 'HEAD';
+            }
+
             throw new MethodNotAllowedException(array_values(array_unique($allowed)));
         }
 
+        if ($invalidParameter !== null) {
+            throw $invalidParameter;
+        }
+
         return null;
+    }
+
+    /**
+     * @param array<string, string> $params
+     */
+    private function createMatch(Route $route, array $params): RouteMatch
+    {
+        return new RouteMatch($route, array_replace($route->defaults, $params));
     }
 
     private function isMethodMatch(Route $route, string $method): bool
@@ -93,13 +140,20 @@ readonly class RouteResolver
 
         $routePattern = $patternCache[$routePath];
 
-        if (preg_match($routePattern, $requestPath, $matches)) {
-            return array_filter($matches, function ($key) {
-                return is_string($key);
-            }, ARRAY_FILTER_USE_KEY);
+        if (preg_match($routePattern, $requestPath, $matches, PREG_UNMATCHED_AS_NULL) !== 1) {
+            return null;
         }
 
-        return null;
+        // Путь PSR-7 URI закодирован (percent-encoding): значения параметров отдаём декодированными.
+        // Пропущенные опциональные параметры не попадают в результат, чтобы сработали defaults.
+        $params = [];
+        foreach ($matches as $key => $value) {
+            if (is_string($key) && $value !== null) {
+                $params[$key] = rawurldecode($value);
+            }
+        }
+
+        return $params;
     }
 
     private function compileRoutePattern(string $routePath): string
@@ -164,38 +218,52 @@ readonly class RouteResolver
         ));
     }
 
-    private function validateParam(mixed $value, callable|ParamTypesEnum $validator): bool
+    /**
+     * @param callable|ParamTypesEnum|string $validator строка — значение ParamTypesEnum (например, из кеша маршрутов)
+     */
+    private function validateParam(string $value, mixed $validator, string $key, Route $route): bool
     {
+        if (is_string($validator)) {
+            $validator = ParamTypesEnum::tryFrom($validator) ?? $validator;
+        }
+
         if ($validator instanceof ParamTypesEnum) {
             return match ($validator) {
                 ParamTypesEnum::INT    => ctype_digit($value),
-                ParamTypesEnum::STRING => is_string($value),
-                default                => true,
+                ParamTypesEnum::STRING => true,
             };
         }
 
-        // Кастомный валидатор
-        return $validator($value);
+        if (is_callable($validator)) {
+            return (bool) $validator($value);
+        }
+
+        throw new InvalidArgumentException(sprintf(
+            'Invalid validator for parameter "%s" of route "%s": expected %s value or callable, got %s.',
+            $key,
+            $route->path,
+            ParamTypesEnum::class,
+            get_debug_type($validator),
+        ));
     }
 
     /**
+     * Возвращает имя первого параметра, не прошедшего валидатор, или null.
+     *
      * @param array<string, string> $params
      */
-    private function validateParams(Route $route, array $params): void
+    private function findInvalidParam(Route $route, array $params): ?string
     {
         foreach ($params as $key => $value) {
             if (!isset($route->validators[$key])) {
                 continue;
             }
 
-            $validator = $route->validators[$key];
-            if (!$this->validateParam($value, $validator)) {
-                throw new InvalidRouteParameterException(sprintf(
-                    'Invalid parameter: %s. This may indicate an invalid value or a missing/misordered route for path "%s".',
-                    $key,
-                    $route->path,
-                ));
+            if (!$this->validateParam($value, $route->validators[$key], $key, $route)) {
+                return $key;
             }
         }
+
+        return null;
     }
 }

@@ -7,12 +7,16 @@ namespace PhpSoftBox\Router;
 use PhpSoftBox\Router\Exception\RouteNotFoundException;
 use Psr\Http\Message\ServerRequestInterface;
 
+use function array_map;
+use function explode;
+use function implode;
 use function interface_exists;
 use function is_a;
 use function is_object;
 use function ltrim;
 use function preg_match;
 use function preg_replace;
+use function rawurlencode;
 use function rtrim;
 use function str_ends_with;
 use function str_replace;
@@ -50,8 +54,12 @@ final readonly class UrlGenerator implements UrlGeneratorInterface
 
         foreach ($params as $key => $value) {
             $paramValue = $this->normalizeUrlParamValue($name, (string) $key, $value);
-            $path       = str_replace(['{' . $key . '*}', '{' . $key . '*?}'], trim($paramValue, '/'), $path);
-            $path       = str_replace(['{' . $key . '}', '{' . $key . '?}'], $paramValue, $path);
+            $path       = str_replace(
+                ['{' . $key . '*}', '{' . $key . '*?}'],
+                $this->encodeWildcardValue($paramValue),
+                $path,
+            );
+            $path = str_replace(['{' . $key . '}', '{' . $key . '?}'], rawurlencode($paramValue), $path);
         }
 
         $path = (string) preg_replace('~/?\{[^}/]+\*\?}~', '', $path);
@@ -98,6 +106,14 @@ final readonly class UrlGenerator implements UrlGeneratorInterface
         }
 
         return (string) $value;
+    }
+
+    /**
+     * Кодирует wildcard-значение посегментно: разделители "/" сохраняются, остальное — через rawurlencode().
+     */
+    private function encodeWildcardValue(string $value): string
+    {
+        return implode('/', array_map(rawurlencode(...), explode('/', trim($value, '/'))));
     }
 
     private function buildAbsoluteUrl(Route $route, string $path, ?string $host = null): string

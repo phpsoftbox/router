@@ -14,11 +14,12 @@ use PhpSoftBox\Router\Middleware\RouteMiddlewareResolverInterface;
 use PhpSoftBox\Router\Profiler\RouterProfilerCollector;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
+use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
 use RuntimeException;
 use Throwable;
 
-use function array_shift;
+use function array_values;
 use function call_user_func;
 use function count;
 use function hrtime;
@@ -56,30 +57,32 @@ class Dispatcher
             category: 'router',
         );
 
-        $handler = new class ($handler, $middlewareStack, $this->handlerResolver) implements RequestHandlerInterface {
-            private Closure|array|string $handler;
-            private array $middlewareStack;
-            private HandlerResolverInterface $handlerResolver;
+        // Стек не мутируется: каждый шаг получает свою копию обработчика с позицией следующего middleware.
+        // Поэтому повторный $handler->handle() (retry, транзакции) снова проходит весь оставшийся стек.
+        $handler = new class ($handler, array_values($middlewareStack), $this->handlerResolver) implements RequestHandlerInterface {
+            private int $position = 0;
 
+            /**
+             * @param list<MiddlewareInterface> $middlewareStack
+             */
             public function __construct(
-                callable|array|string $handler,
-                array $middlewareStack,
-                HandlerResolverInterface $handlerResolver,
+                private readonly Closure|array|string $handler,
+                private readonly array $middlewareStack,
+                private readonly HandlerResolverInterface $handlerResolver,
             ) {
-                $this->handler         = $handler;
-                $this->middlewareStack = $middlewareStack;
-                $this->handlerResolver = $handlerResolver;
             }
 
             public function handle(ServerRequestInterface $request): ResponseInterface
             {
-                if (empty($this->middlewareStack)) {
+                $middleware = $this->middlewareStack[$this->position] ?? null;
+                if ($middleware === null) {
                     return $this->resolveHandler($this->handler, $request);
                 }
 
-                $middleware = array_shift($this->middlewareStack);
+                $next           = clone $this;
+                $next->position = $this->position + 1;
 
-                return $middleware->process($request, $this);
+                return $middleware->process($request, $next);
             }
 
             private function resolveHandler(callable|array|string $handler, ServerRequestInterface $request): ResponseInterface

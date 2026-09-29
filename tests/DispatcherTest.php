@@ -86,4 +86,50 @@ final class DispatcherTest extends TestCase
 
         $this->assertSame('H B A', $resp->getHeaderLine('X'));
     }
+
+    /**
+     * Проверяем, что повторный вызов следующего обработчика из middleware (retry) каждый раз проходит весь
+     * оставшийся стек, а не только конечный обработчик.
+     *
+     * @see Dispatcher::dispatch()
+     */
+    #[Test]
+    public function repeatedNextCallRunsRemainingStackEachTime(): void
+    {
+        $calls = [];
+
+        $retry = new class () implements MiddlewareInterface {
+            public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
+            {
+                $handler->handle($request);
+
+                return $handler->handle($request);
+            }
+        };
+        $guard = new class ($calls) implements MiddlewareInterface {
+            public function __construct(
+                private array &$calls,
+            ) {
+            }
+
+            public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
+            {
+                $this->calls[] = 'guard';
+
+                return $handler->handle($request);
+            }
+        };
+        $handler = function (ServerRequestInterface $r) use (&$calls): ResponseInterface {
+            $calls[] = 'handler';
+
+            return new Response(200);
+        };
+
+        $route = new Route('GET', '/x', $handler, middlewares: [$retry, $guard]);
+
+        new Dispatcher()->dispatch($route, new ServerRequest('GET', 'https://example.com/x'));
+
+        // Оба прохода retry-middleware выполняют guard перед обработчиком.
+        $this->assertSame(['guard', 'handler', 'guard', 'handler'], $calls);
+    }
 }

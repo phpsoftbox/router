@@ -7,6 +7,7 @@ namespace PhpSoftBox\Router\Tests;
 use InvalidArgumentException;
 use PhpSoftBox\Http\Message\ServerRequest;
 use PhpSoftBox\Router\Exception\InvalidRouteParameterException;
+use PhpSoftBox\Router\Exception\MethodNotAllowedException;
 use PhpSoftBox\Router\ParamTypesEnum;
 use PhpSoftBox\Router\RouteCollector;
 use PhpSoftBox\Router\RouteResolver;
@@ -224,5 +225,120 @@ final class RouteResolverTest extends TestCase
         $this->expectException(InvalidRouteParameterException::class);
         $this->expectExceptionMessage('Invalid parameter: slug');
         $resolver->resolve($bad);
+    }
+
+    /**
+     * Проверяем, что HEAD-запрос без явного HEAD-маршрута сопоставляется с GET-маршрутом.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function headRequestMatchesGetRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', fn ($r) => null)->name('users.index');
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('HEAD', 'https://example.com/users'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('users.index', $match->route->name);
+    }
+
+    /**
+     * Проверяем, что явный HEAD-маршрут приоритетнее GET-маршрута, даже если зарегистрирован позже.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function explicitHeadRouteHasPriorityOverGetRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', fn ($r) => null)->name('users.index');
+        $rc->head('/users', fn ($r) => null)->name('users.head');
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('HEAD', 'https://example.com/users'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('users.head', $match->route->name);
+    }
+
+    /**
+     * Проверяем, что при 405 для пути с GET-маршрутом в списке допустимых методов есть и HEAD.
+     *
+     * @see RouteResolver::resolve()
+     * @see MethodNotAllowedException::allowedMethods()
+     */
+    #[Test]
+    public function methodNotAllowedListsHeadForGetRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users', fn ($r) => null);
+        $rc->post('/users', fn ($r) => null);
+
+        try {
+            new RouteResolver($rc)->resolve(new ServerRequest('DELETE', 'https://example.com/users'));
+            $this->fail('Ожидалось исключение MethodNotAllowedException.');
+        } catch (MethodNotAllowedException $exception) {
+            $this->assertSame(['GET', 'POST', 'HEAD'], $exception->allowedMethods());
+        }
+    }
+
+    /**
+     * Проверяем, что маршрут с непрошедшим валидатором не мешает найти следующий подходящий маршрут.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function invalidParamFallsThroughToNextRoute(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/items/{id}', fn ($r) => null)->name('items.show')->validators(['id' => ParamTypesEnum::INT]);
+        $rc->get('/items/new', fn ($r) => null)->name('items.new');
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/items/new'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('items.new', $match->route->name);
+    }
+
+    /**
+     * Проверяем, что строковое значение ParamTypesEnum (формат кеша маршрутов) работает как валидатор.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function stringParamTypeValidatorIsApplied(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users/{id}', fn ($r) => null)->validators(['id' => 'int']);
+
+        $resolver = new RouteResolver($rc);
+
+        $this->assertNotNull($resolver->resolve(new ServerRequest('GET', 'https://example.com/users/10')));
+
+        $this->expectException(InvalidRouteParameterException::class);
+        $resolver->resolve(new ServerRequest('GET', 'https://example.com/users/abc'));
+    }
+
+    /**
+     * Проверяем, что неподдерживаемый валидатор даёт понятное исключение вместо TypeError.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function unsupportedValidatorThrowsInvalidArgument(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/users/{id}', fn ($r) => null)->validators(['id' => 'not-a-validator']);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid validator for parameter "id"');
+        new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/users/10'));
     }
 }

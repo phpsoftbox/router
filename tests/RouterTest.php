@@ -7,7 +7,6 @@ namespace PhpSoftBox\Router\Tests;
 use PhpSoftBox\Http\Message\Response;
 use PhpSoftBox\Http\Message\ServerRequest;
 use PhpSoftBox\Router\Dispatcher;
-use PhpSoftBox\Router\Exception\InvalidRouteParameterException;
 use PhpSoftBox\Router\Exception\RouteNotFoundException;
 use PhpSoftBox\Router\ParamTypesEnum;
 use PhpSoftBox\Router\RouteCollector;
@@ -125,7 +124,7 @@ final class RouterTest extends TestCase
     }
 
     /**
-     * Проверяем, что невалидный параметр приводит к исключению, даже если есть более специфичный маршрут.
+     * Проверяем, что маршрут с невалидным параметром считается несовпавшим и запрос доходит до следующего маршрута.
      *
      * @see Router::handle()
      * @see RouteResolver::resolve()
@@ -140,9 +139,9 @@ final class RouterTest extends TestCase
 
         $router = $this->makeRouter($rc);
 
-        $this->expectException(InvalidRouteParameterException::class);
-        $this->expectExceptionMessage('Invalid parameter: id');
-        $router->handle(new ServerRequest('GET', 'https://example.com/users/create'));
+        $response = $router->handle(new ServerRequest('GET', 'https://example.com/users/create'));
+
+        $this->assertSame(201, $response->getStatusCode());
     }
 
 }

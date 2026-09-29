@@ -341,4 +341,62 @@ final class RouteResolverTest extends TestCase
         $this->expectExceptionMessage('Invalid validator for parameter "id"');
         new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/users/10'));
     }
+
+    /**
+     * Проверяем, что значение параметра декодируется из percent-encoding перед валидацией и передачей в матч.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function paramValueIsUrlDecoded(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/tags/{name}', fn ($r) => null)->validators([
+            'name' => fn (string $value): bool => $value === 'a/b?c#d тег',
+        ]);
+
+        $match = new RouteResolver($rc)->resolve(
+            new ServerRequest('GET', 'https://example.com/tags/a%2Fb%3Fc%23d%20%D1%82%D0%B5%D0%B3'),
+        );
+
+        $this->assertNotNull($match);
+        $this->assertSame('a/b?c#d тег', $match->params['name']);
+    }
+
+    /**
+     * Проверяем, что wildcard-значение декодируется с сохранением разделителей сегментов.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function wildcardParamValueIsUrlDecoded(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/docs/{path*}', fn ($r) => null);
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/docs/guide/a%20b/c%23d'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('guide/a b/c#d', $match->params['path']);
+    }
+
+    /**
+     * Проверяем, что пропущенный опциональный параметр не попадает в матч пустой строкой и берётся из defaults.
+     *
+     * @see RouteResolver::resolve()
+     */
+    #[Test]
+    public function missingOptionalParamUsesDefault(): void
+    {
+        $rc = new RouteCollector();
+
+        $rc->get('/a/{x?}/b', fn ($r) => null)->defaults(['x' => 'def']);
+
+        $match = new RouteResolver($rc)->resolve(new ServerRequest('GET', 'https://example.com/a/b'));
+
+        $this->assertNotNull($match);
+        $this->assertSame('def', $match->params['x']);
+    }
 }

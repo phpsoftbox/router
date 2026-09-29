@@ -20,6 +20,9 @@ use PhpSoftBox\Router\Exception\InvalidRouteParameterException;
 use PhpSoftBox\Router\Handler\ContainerHandlerResolver;
 use PhpSoftBox\Router\Handler\Parameter\ApiSchemaPayloadResolverInterface;
 use PhpSoftBox\Router\Route;
+use PhpSoftBox\Router\RouteCollector;
+use PhpSoftBox\Router\Router;
+use PhpSoftBox\Router\RouteResolver;
 use PhpSoftBox\Router\Tests\Fixtures\ApiSchemaController;
 use PhpSoftBox\Router\Tests\Fixtures\DummyChild;
 use PhpSoftBox\Router\Tests\Fixtures\DummyConnection;
@@ -174,6 +177,29 @@ final class ContainerHandlerResolverTest extends TestCase
 
         $this->assertTrue($container->called);
         $this->assertSame('42', $response->getHeaderLine('X-Id'));
+    }
+
+    /**
+     * Проверяем, что закодированный параметр маршрута вида "{db.password}" доходит до обработчика декодированным
+     * и без интерполяции.
+     *
+     * @see Router::handle()
+     * @see ContainerHandlerResolver::resolve()
+     */
+    #[Test]
+    public function routeParamWithPlaceholderSyntaxReachesHandlerAsIs(): void
+    {
+        $container = new ContainerCallStub([RouteParamController::class => new RouteParamController()]);
+
+        $routes = new RouteCollector();
+
+        $routes->get('/users/{id}', [RouteParamController::class, 'show']);
+
+        $router = new Router(new RouteResolver($routes), new Dispatcher(new ContainerHandlerResolver($container)), $routes);
+
+        $response = $router->handle(new ServerRequest('GET', 'https://example.com/users/%7Bdb.password%7D'));
+
+        $this->assertSame('{db.password}', $response->getHeaderLine('X-Id'));
     }
 
     /**

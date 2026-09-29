@@ -9,7 +9,6 @@ use PhpSoftBox\Router\Exception\InvalidRouteParameterException;
 use PhpSoftBox\Router\Exception\MethodNotAllowedException;
 use Psr\Http\Message\ServerRequestInterface;
 
-use function array_filter;
 use function array_replace;
 use function array_unique;
 use function array_values;
@@ -21,14 +20,15 @@ use function is_string;
 use function preg_match;
 use function preg_match_all;
 use function preg_quote;
+use function rawurldecode;
 use function sprintf;
 use function str_ends_with;
 use function strlen;
 use function substr;
 
-use const ARRAY_FILTER_USE_KEY;
 use const PREG_OFFSET_CAPTURE;
 use const PREG_SET_ORDER;
+use const PREG_UNMATCHED_AS_NULL;
 
 readonly class RouteResolver
 {
@@ -140,13 +140,20 @@ readonly class RouteResolver
 
         $routePattern = $patternCache[$routePath];
 
-        if (preg_match($routePattern, $requestPath, $matches)) {
-            return array_filter($matches, function ($key) {
-                return is_string($key);
-            }, ARRAY_FILTER_USE_KEY);
+        if (preg_match($routePattern, $requestPath, $matches, PREG_UNMATCHED_AS_NULL) !== 1) {
+            return null;
         }
 
-        return null;
+        // Путь PSR-7 URI закодирован (percent-encoding): значения параметров отдаём декодированными.
+        // Пропущенные опциональные параметры не попадают в результат, чтобы сработали defaults.
+        $params = [];
+        foreach ($matches as $key => $value) {
+            if (is_string($key) && $value !== null) {
+                $params[$key] = rawurldecode($value);
+            }
+        }
+
+        return $params;
     }
 
     private function compileRoutePattern(string $routePath): string
